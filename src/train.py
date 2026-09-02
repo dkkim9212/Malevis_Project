@@ -1,4 +1,5 @@
 import torch
+import os
 import torch.nn as nn
 import argparse
 import time
@@ -14,6 +15,12 @@ from model import get_model
 # ==========================================
 
 parser = argparse.ArgumentParser()
+
+parser.add_argument(
+    "--save_dir",
+    type=str,
+    default="./models"
+)
 
 parser.add_argument(
     "--data_dir",
@@ -40,6 +47,18 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
+
+os.makedirs(
+    args.save_dir,
+    exist_ok=True
+)
+
+best_model_path = os.path.join(
+    args.save_dir,
+    "resnet18_best.pth"
+)
+
+print("모델 저장 위치 :", best_model_path)
 
 
 # ==========================================
@@ -287,11 +306,20 @@ for epoch in range(args.epochs):
         best_val_accuracy = val_accuracy
 
         torch.save(
-            model.state_dict(),
-            "best_model.pth"
-        )
+        {
+            "epoch": epoch + 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "val_accuracy": val_accuracy,
+            "classes": classes
+        },
+        best_model_path
+    )
 
-        print("Best Model 저장!")
+    print(
+        f"Best Model 저장! "
+        f"({val_accuracy:.2f}%)"
+    )
 
 
 print("\n학습 완료")
