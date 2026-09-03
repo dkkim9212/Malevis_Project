@@ -39,7 +39,8 @@ def get_dataloaders(data_dir, batch_size=32):
     batch_size=batch_size,
     shuffle=True,
     num_workers=2,
-    pin_memory=True
+    pin_memory=True,
+    persistent_workers=True
     )
 
     val_loader = DataLoader(
@@ -47,7 +48,7 @@ def get_dataloaders(data_dir, batch_size=32):
     batch_size=batch_size,
     shuffle=False,
     num_workers=2,
-    pin_memory=True
+    pin_memory=True,
+    persistent_workers=True
     )
-
     return train_loader, val_loader, train_dataset.classes
