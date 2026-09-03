@@ -35,17 +35,19 @@ def get_dataloaders(data_dir, batch_size=32):
     )
 
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=2
+    train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=2,
+    pin_memory=True
     )
 
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2
+    val_dataset,
+    batch_size=batch_size,
+    shuffle=False,
+    num_workers=2,
+    pin_memory=True
     )
 
     return train_loader, val_loader, train_dataset.classes
