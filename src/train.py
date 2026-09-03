@@ -1,8 +1,10 @@
-import torch
 import os
-import torch.nn as nn
-import argparse
+import csv
 import time
+import argparse
+
+import torch
+import torch.nn as nn
 
 from tqdm.auto import tqdm
 
@@ -11,16 +13,10 @@ from model import get_model
 
 
 # ==========================================
-# 실행 옵션
+# 1. 실행 옵션
 # ==========================================
 
 parser = argparse.ArgumentParser()
-
-parser.add_argument(
-    "--save_dir",
-    type=str,
-    default="./models"
-)
 
 parser.add_argument(
     "--data_dir",
@@ -46,7 +42,18 @@ parser.add_argument(
     default=0.0001
 )
 
+parser.add_argument(
+    "--save_dir",
+    type=str,
+    default="./models"
+)
+
 args = parser.parse_args()
+
+
+# ==========================================
+# 2. 저장 폴더 / 파일 경로
+# ==========================================
 
 os.makedirs(
     args.save_dir,
@@ -58,11 +65,17 @@ best_model_path = os.path.join(
     "resnet18_best.pth"
 )
 
+csv_path = os.path.join(
+    args.save_dir,
+    "resnet18_history.csv"
+)
+
 print("모델 저장 위치 :", best_model_path)
+print("학습 기록 위치 :", csv_path)
 
 
 # ==========================================
-# Device
+# 3. GPU 설정
 # ==========================================
 
 device = torch.device(
@@ -73,7 +86,7 @@ print("사용 장치 :", device)
 
 
 # ==========================================
-# Dataset
+# 4. Dataset
 # ==========================================
 
 train_loader, val_loader, classes = get_dataloaders(
@@ -87,7 +100,7 @@ print("Validation 이미지 :", len(val_loader.dataset))
 
 
 # ==========================================
-# Model
+# 5. Model
 # ==========================================
 
 model = get_model(
@@ -98,7 +111,7 @@ model = model.to(device)
 
 
 # ==========================================
-# Loss / Optimizer
+# 6. Loss / Optimizer
 # ==========================================
 
 criterion = nn.CrossEntropyLoss()
@@ -110,14 +123,16 @@ optimizer = torch.optim.Adam(
 
 
 # ==========================================
-# Best Model
+# 7. 학습 기록 변수
 # ==========================================
 
 best_val_accuracy = 0.0
 
+history = []
+
 
 # ==========================================
-# Training
+# 8. Training
 # ==========================================
 
 for epoch in range(args.epochs):
@@ -126,9 +141,10 @@ for epoch in range(args.epochs):
 
     print(f"\nEpoch [{epoch + 1}/{args.epochs}]")
 
-    # --------------------------------------
+
+    # ======================================
     # Train
-    # --------------------------------------
+    # ======================================
 
     model.train()
 
@@ -147,14 +163,17 @@ for epoch in range(args.epochs):
         images = images.to(device)
         labels = labels.to(device)
 
-        # 이전 gradient 초기화
+        # 이전 Gradient 초기화
         optimizer.zero_grad()
 
         # 순전파
         outputs = model(images)
 
         # Loss 계산
-        loss = criterion(outputs, labels)
+        loss = criterion(
+            outputs,
+            labels
+        )
 
         # 역전파
         loss.backward()
@@ -162,43 +181,50 @@ for epoch in range(args.epochs):
         # 가중치 업데이트
         optimizer.step()
 
+
+        # Loss 누적
         train_loss += loss.item()
 
+
+        # 가장 높은 클래스 점수 선택
         _, predicted = torch.max(
             outputs,
             1
         )
 
+
+        # 정확도 계산
         train_total += labels.size(0)
 
         train_correct += (
             predicted == labels
         ).sum().item()
 
-        # 현재까지의 정확도
+
         current_accuracy = (
             100 * train_correct / train_total
         )
 
-        # tqdm 오른쪽에 실시간 정보 표시
+
+        # tqdm 진행률에 Loss / Accuracy 표시
         train_progress.set_postfix(
             loss=f"{loss.item():.4f}",
             acc=f"{current_accuracy:.2f}%"
         )
 
 
-    train_accuracy = (
-        100 * train_correct / train_total
-    )
-
     average_train_loss = (
         train_loss / len(train_loader)
     )
 
+    train_accuracy = (
+        100 * train_correct / train_total
+    )
 
-    # --------------------------------------
+
+    # ======================================
     # Validation
-    # --------------------------------------
+    # ======================================
 
     model.eval()
 
@@ -206,11 +232,13 @@ for epoch in range(args.epochs):
     val_correct = 0
     val_total = 0
 
+
     val_progress = tqdm(
         val_loader,
         desc="Validation",
         leave=True
     )
+
 
     with torch.no_grad():
 
@@ -219,8 +247,12 @@ for epoch in range(args.epochs):
             images = images.to(device)
             labels = labels.to(device)
 
+
+            # 순전파
             outputs = model(images)
 
+
+            # Validation Loss
             loss = criterion(
                 outputs,
                 labels
@@ -228,20 +260,26 @@ for epoch in range(args.epochs):
 
             val_loss += loss.item()
 
+
+            # 예측 클래스
             _, predicted = torch.max(
                 outputs,
                 1
             )
 
+
+            # 정확도 계산
             val_total += labels.size(0)
 
             val_correct += (
                 predicted == labels
             ).sum().item()
 
+
             current_val_accuracy = (
                 100 * val_correct / val_total
             )
+
 
             val_progress.set_postfix(
                 loss=f"{loss.item():.4f}",
@@ -249,82 +287,143 @@ for epoch in range(args.epochs):
             )
 
 
-    val_accuracy = (
-        100 * val_correct / val_total
-    )
-
     average_val_loss = (
         val_loss / len(val_loader)
     )
 
+    val_accuracy = (
+        100 * val_correct / val_total
+    )
 
-    # --------------------------------------
+
+    # ======================================
     # Epoch 시간
-    # --------------------------------------
+    # ======================================
 
     epoch_time = (
         time.time() - epoch_start_time
     )
 
 
-    # --------------------------------------
+    # ======================================
     # 결과 출력
-    # --------------------------------------
+    # ======================================
 
     print(
-        f"Train Loss     : "
-        f"{average_train_loss:.4f}"
+        f"Train Loss     : {average_train_loss:.4f}"
     )
 
     print(
-        f"Train Accuracy : "
-        f"{train_accuracy:.2f}%"
+        f"Train Accuracy : {train_accuracy:.2f}%"
     )
 
     print(
-        f"Val Loss       : "
-        f"{average_val_loss:.4f}"
+        f"Val Loss       : {average_val_loss:.4f}"
     )
 
     print(
-        f"Val Accuracy   : "
-        f"{val_accuracy:.2f}%"
+        f"Val Accuracy   : {val_accuracy:.2f}%"
     )
 
     print(
-        f"Epoch Time     : "
-        f"{epoch_time:.2f}초"
+        f"Epoch Time     : {epoch_time:.2f}초"
     )
 
 
-    # --------------------------------------
-    # Best Model 저장
-    # --------------------------------------
+    # ======================================
+    # 9. Epoch 결과 기록
+    # ======================================
+
+    history.append({
+        "epoch": epoch + 1,
+        "train_loss": average_train_loss,
+        "train_accuracy": train_accuracy,
+        "val_loss": average_val_loss,
+        "val_accuracy": val_accuracy,
+        "epoch_time": epoch_time
+    })
+
+
+    # ======================================
+    # 10. CSV 저장
+    # ======================================
+
+    with open(
+        csv_path,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as f:
+
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "epoch",
+                "train_loss",
+                "train_accuracy",
+                "val_loss",
+                "val_accuracy",
+                "epoch_time"
+            ]
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            history
+        )
+
+
+    # ======================================
+    # 11. Best Model 저장
+    # ======================================
 
     if val_accuracy > best_val_accuracy:
 
         best_val_accuracy = val_accuracy
 
         torch.save(
-        {
-            "epoch": epoch + 1,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "val_accuracy": val_accuracy,
-            "classes": classes
-        },
-        best_model_path
-    )
+            {
+                "epoch": epoch + 1,
 
-    print(
-        f"Best Model 저장! "
-        f"({val_accuracy:.2f}%)"
-    )
+                "model_state_dict":
+                    model.state_dict(),
 
+                "optimizer_state_dict":
+                    optimizer.state_dict(),
+
+                "val_accuracy":
+                    val_accuracy,
+
+                "classes":
+                    classes
+            },
+            best_model_path
+        )
+
+        print(
+            f"Best Model 저장! "
+            f"({val_accuracy:.2f}%)"
+        )
+
+
+# ==========================================
+# 12. 학습 종료
+# ==========================================
 
 print("\n학습 완료")
 
 print(
     f"Best Validation Accuracy: "
     f"{best_val_accuracy:.2f}%"
+)
+
+print(
+    f"Best Model: "
+    f"{best_model_path}"
+)
+
+print(
+    f"History CSV: "
+    f"{csv_path}"
 )
