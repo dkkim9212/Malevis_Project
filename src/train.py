@@ -14,7 +14,7 @@ from dataset import get_dataloaders
 from model import (
     get_model,
     freeze_backbone,
-    unfreeze_layer4
+    unfreeze_layer3_layer4
 )
 
 
@@ -35,13 +35,11 @@ torch.cuda.manual_seed_all(SEED)
 
 parser = argparse.ArgumentParser()
 
-
 parser.add_argument(
     "--data_dir",
     type=str,
     required=True
 )
-
 
 parser.add_argument(
     "--save_dir",
@@ -49,53 +47,46 @@ parser.add_argument(
     default="./models"
 )
 
-
 parser.add_argument(
     "--batch_size",
     type=int,
-    default=32
+    default=64
 )
 
-
-# Stage 1 : FC만 학습
+# FC warm-up
 parser.add_argument(
     "--warmup_epochs",
     type=int,
-    default=2
+    default=3
 )
 
-
-# Stage 2 : Layer4 + FC 학습
+# Layer3 + Layer4 + FC fine-tuning
 parser.add_argument(
     "--finetune_epochs",
     type=int,
-    default=10
+    default=25
 )
 
-
-# Stage 1 FC Learning Rate
+# Warm-up FC LR
 parser.add_argument(
     "--head_lr",
     type=float,
     default=0.0003
 )
 
-
-# Stage 2 Layer4 Learning Rate
+# Layer3 + Layer4 LR
 parser.add_argument(
     "--backbone_lr",
     type=float,
-    default=0.00001
+    default=0.00005
 )
 
-
-# Stage 2 FC Learning Rate
+# Fine-tuning FC LR
 parser.add_argument(
     "--finetune_head_lr",
     type=float,
-    default=0.0001
+    default=0.0003
 )
-
 
 parser.add_argument(
     "--weight_decay",
@@ -103,19 +94,17 @@ parser.add_argument(
     default=0.0001
 )
 
-
 parser.add_argument(
     "--patience",
     type=int,
-    default=4
+    default=7
 )
-
 
 args = parser.parse_args()
 
 
 # ==========================================
-# 3. 저장 경로
+# 3. Save paths
 # ==========================================
 
 os.makedirs(
@@ -123,28 +112,18 @@ os.makedirs(
     exist_ok=True
 )
 
-
 best_model_path = os.path.join(
     args.save_dir,
-    "resnet18_exp3_best.pth"
+    "resnet18_stage1_best.pth"
 )
-
 
 csv_path = os.path.join(
     args.save_dir,
-    "resnet18_exp3_history.csv"
+    "resnet18_stage1_history.csv"
 )
 
-
-print(
-    "모델 저장 위치 :",
-    best_model_path
-)
-
-print(
-    "학습 기록 위치 :",
-    csv_path
-)
+print("모델 저장 위치 :", best_model_path)
+print("학습 기록 위치 :", csv_path)
 
 
 # ==========================================
@@ -157,38 +136,30 @@ device = torch.device(
     else "cpu"
 )
 
-
-print(
-    "사용 장치 :",
-    device
-)
+print("사용 장치 :", device)
 
 
 # ==========================================
 # 5. Dataset
 # ==========================================
 
-train_loader, val_loader, classes = (
-    get_dataloaders(
-        args.data_dir,
-        args.batch_size
-    )
+train_loader, val_loader, classes = get_dataloaders(
+    args.data_dir,
+    args.batch_size
 )
 
+print("클래스 :", classes)
+print("클래스 수 :", len(classes))
+print("Train 이미지 :", len(train_loader.dataset))
+print("Validation 이미지 :", len(val_loader.dataset))
 
 print(
-    "클래스 수 :",
-    len(classes)
+    "Train 원본 분포 :",
+    train_loader.dataset.class_counts
 )
-
 print(
-    "Train 이미지 :",
-    len(train_loader.dataset)
-)
-
-print(
-    "Validation 이미지 :",
-    len(val_loader.dataset)
+    "Validation 원본 분포 :",
+    val_loader.dataset.class_counts
 )
 
 
@@ -223,18 +194,48 @@ scaler = torch.amp.GradScaler(
 
 
 # ==========================================
-# 9. 기록용 변수
+# Metric helper
+# label 0 = Benign
+# label 1 = Malware
 # ==========================================
 
-history = []
+def calculate_metrics(tp, tn, fp, fn):
 
-best_val_accuracy = 0.0
+    accuracy = (
+        100.0 * (tp + tn) / max(tp + tn + fp + fn, 1)
+    )
 
-global_epoch = 0
+    precision = (
+        100.0 * tp / max(tp + fp, 1)
+    )
+
+    recall = (
+        100.0 * tp / max(tp + fn, 1)
+    )
+
+    f1 = (
+        2 * precision * recall / max(precision + recall, 1e-12)
+    )
+
+    benign_recall = (
+        100.0 * tn / max(tn + fp, 1)
+    )
+
+    return {
+        "accuracy": accuracy,
+        "malware_precision": precision,
+        "malware_recall": recall,
+        "malware_f1": f1,
+        "benign_recall": benign_recall,
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn
+    }
 
 
 # ==========================================
-# 공통 Train 함수
+# Train
 # ==========================================
 
 def train_one_epoch(
@@ -252,13 +253,11 @@ def train_one_epoch(
     correct = 0
     total = 0
 
-
     progress = tqdm(
         train_loader,
         desc="Train",
         leave=True
     )
-
 
     for images, labels in progress:
 
@@ -272,11 +271,9 @@ def train_one_epoch(
             non_blocking=True
         )
 
-
         optimizer.zero_grad(
             set_to_none=True
         )
-
 
         with torch.amp.autocast(
             device_type=device.type,
@@ -290,73 +287,42 @@ def train_one_epoch(
                 labels
             )
 
-
-        scaler.scale(
-            loss
-        ).backward()
-
-
-        scaler.step(
-            optimizer
-        )
-
-
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
         scaler.update()
 
+        running_loss += loss.item()
 
-        running_loss += (
-            loss.item()
-        )
-
-
-        _, predicted = torch.max(
-            outputs,
-            1
-        )
-
+        predicted = outputs.argmax(dim=1)
 
         total += labels.size(0)
-
 
         correct += (
             predicted == labels
         ).sum().item()
 
-
         current_accuracy = (
-            100
-            * correct
-            / total
+            100.0 * correct / total
         )
-
 
         progress.set_postfix(
             loss=f"{loss.item():.4f}",
             acc=f"{current_accuracy:.2f}%"
         )
 
-
     average_loss = (
-        running_loss
-        / len(train_loader)
+        running_loss / len(train_loader)
     )
-
 
     accuracy = (
-        100
-        * correct
-        / total
+        100.0 * correct / total
     )
 
-
-    return (
-        average_loss,
-        accuracy
-    )
+    return average_loss, accuracy
 
 
 # ==========================================
-# 공통 Validation 함수
+# Validation
 # ==========================================
 
 def validate(
@@ -370,16 +336,16 @@ def validate(
 
     running_loss = 0.0
 
-    correct = 0
-    total = 0
-
+    tp = 0
+    tn = 0
+    fp = 0
+    fn = 0
 
     progress = tqdm(
         val_loader,
         desc="Validation",
         leave=True
     )
-
 
     with torch.no_grad():
 
@@ -395,7 +361,6 @@ def validate(
                 non_blocking=True
             )
 
-
             with torch.amp.autocast(
                 device_type=device.type,
                 enabled=(device.type == "cuda")
@@ -408,61 +373,59 @@ def validate(
                     labels
                 )
 
+            running_loss += loss.item()
 
-            running_loss += (
-                loss.item()
-            )
+            predicted = outputs.argmax(dim=1)
 
-
-            _, predicted = torch.max(
-                outputs,
-                1
-            )
-
-
-            total += labels.size(0)
-
-
-            correct += (
-                predicted == labels
+            tp += (
+                (predicted == 1)
+                & (labels == 1)
             ).sum().item()
 
+            tn += (
+                (predicted == 0)
+                & (labels == 0)
+            ).sum().item()
 
-            current_accuracy = (
-                100
-                * correct
-                / total
+            fp += (
+                (predicted == 1)
+                & (labels == 0)
+            ).sum().item()
+
+            fn += (
+                (predicted == 0)
+                & (labels == 1)
+            ).sum().item()
+
+            metrics = calculate_metrics(
+                tp, tn, fp, fn
             )
-
 
             progress.set_postfix(
-                loss=f"{loss.item():.4f}",
-                acc=f"{current_accuracy:.2f}%"
+                acc=f"{metrics['accuracy']:.2f}%",
+                recall=f"{metrics['malware_recall']:.2f}%"
             )
 
-
     average_loss = (
-        running_loss
-        / len(val_loader)
+        running_loss / len(val_loader)
     )
 
-
-    accuracy = (
-        100
-        * correct
-        / total
+    metrics = calculate_metrics(
+        tp, tn, fp, fn
     )
 
-
-    return (
-        average_loss,
-        accuracy
-    )
+    return average_loss, metrics
 
 
 # ==========================================
-# CSV 저장 함수
+# CSV
 # ==========================================
+
+history = []
+
+best_val_f1 = -1.0
+global_epoch = 0
+
 
 def save_history():
 
@@ -482,466 +445,301 @@ def save_history():
                 "train_accuracy",
                 "val_loss",
                 "val_accuracy",
-                "layer4_lr",
+                "malware_precision",
+                "malware_recall",
+                "malware_f1",
+                "benign_recall",
+                "tp",
+                "tn",
+                "fp",
+                "fn",
+                "backbone_lr",
                 "head_lr",
                 "epoch_time"
             ]
         )
 
-
         writer.writeheader()
+        writer.writerows(history)
 
-        writer.writerows(
-            history
-        )
-
-
-# ==========================================
-# Best Model 저장 함수
-# ==========================================
 
 def save_best_model(
     epoch,
     stage,
-    val_accuracy,
+    val_metrics,
     optimizer
 ):
 
     torch.save(
         {
-            "epoch":
-                epoch,
-
-            "stage":
-                stage,
-
-            "model_state_dict":
-                model.state_dict(),
-
-            "optimizer_state_dict":
-                optimizer.state_dict(),
-
-            "val_accuracy":
-                val_accuracy,
-
-            "classes":
-                classes
+            "epoch": epoch,
+            "stage": stage,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "val_accuracy": val_metrics["accuracy"],
+            "malware_precision": val_metrics["malware_precision"],
+            "malware_recall": val_metrics["malware_recall"],
+            "malware_f1": val_metrics["malware_f1"],
+            "benign_recall": val_metrics["benign_recall"],
+            "classes": classes
         },
         best_model_path
     )
 
 
+def print_val_metrics(val_loss, metrics):
+
+    print(f"Val Loss          : {val_loss:.4f}")
+    print(f"Val Accuracy      : {metrics['accuracy']:.2f}%")
+    print(f"Malware Precision : {metrics['malware_precision']:.2f}%")
+    print(f"Malware Recall    : {metrics['malware_recall']:.2f}%")
+    print(f"Malware F1        : {metrics['malware_f1']:.2f}%")
+    print(f"Benign Recall     : {metrics['benign_recall']:.2f}%")
+
+    print(
+        "Confusion Matrix  : "
+        f"TN={metrics['tn']} "
+        f"FP={metrics['fp']} "
+        f"FN={metrics['fn']} "
+        f"TP={metrics['tp']}"
+    )
+
+
 # ==================================================
-#
-# Stage 1
-# FC만 학습
-#
+# Phase 1
+# FC Warm-up
 # ==================================================
 
-print("\n")
-print("=" * 50)
-print("Stage 1 : FC Layer Warm-up")
-print("=" * 50)
+print("\n" + "=" * 60)
+print("Phase 1 : FC Layer Warm-up")
+print("=" * 60)
 
+freeze_backbone(model)
 
-freeze_backbone(
-    model
-)
-
-
-# FC Layer만 optimizer에 전달
 optimizer = torch.optim.AdamW(
     model.fc.parameters(),
     lr=args.head_lr,
     weight_decay=args.weight_decay
 )
 
-
 for epoch in range(
     args.warmup_epochs
 ):
 
     global_epoch += 1
-
     start_time = time.time()
-
 
     print(
         f"\nWarm-up "
-        f"[{epoch + 1}/"
-        f"{args.warmup_epochs}]"
+        f"[{epoch + 1}/{args.warmup_epochs}]"
     )
 
-
-    train_loss, train_accuracy = (
-        train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            criterion,
-            device
-        )
+    train_loss, train_accuracy = train_one_epoch(
+        model,
+        train_loader,
+        optimizer,
+        criterion,
+        device
     )
 
-
-    val_loss, val_accuracy = (
-        validate(
-            model,
-            val_loader,
-            criterion,
-            device
-        )
+    val_loss, val_metrics = validate(
+        model,
+        val_loader,
+        criterion,
+        device
     )
 
+    epoch_time = time.time() - start_time
 
-    epoch_time = (
-        time.time()
-        - start_time
-    )
-
-
-    print(
-        f"Train Loss     : "
-        f"{train_loss:.4f}"
-    )
-
-    print(
-        f"Train Accuracy : "
-        f"{train_accuracy:.2f}%"
-    )
-
-    print(
-        f"Val Loss       : "
-        f"{val_loss:.4f}"
-    )
-
-    print(
-        f"Val Accuracy   : "
-        f"{val_accuracy:.2f}%"
-    )
-
-    print(
-        f"Epoch Time     : "
-        f"{epoch_time:.2f}초"
-    )
-
+    print(f"Train Loss        : {train_loss:.4f}")
+    print(f"Train Accuracy    : {train_accuracy:.2f}%")
+    print_val_metrics(val_loss, val_metrics)
+    print(f"Epoch Time        : {epoch_time:.2f}초")
 
     history.append({
-        "epoch":
-            global_epoch,
-
-        "stage":
-            "FC_WARMUP",
-
-        "train_loss":
-            train_loss,
-
-        "train_accuracy":
-            train_accuracy,
-
-        "val_loss":
-            val_loss,
-
-        "val_accuracy":
-            val_accuracy,
-
-        "layer4_lr":
-            0,
-
-        "head_lr":
-            args.head_lr,
-
-        "epoch_time":
-            epoch_time
+        "epoch": global_epoch,
+        "stage": "FC_WARMUP",
+        "train_loss": train_loss,
+        "train_accuracy": train_accuracy,
+        "val_loss": val_loss,
+        "val_accuracy": val_metrics["accuracy"],
+        "malware_precision": val_metrics["malware_precision"],
+        "malware_recall": val_metrics["malware_recall"],
+        "malware_f1": val_metrics["malware_f1"],
+        "benign_recall": val_metrics["benign_recall"],
+        "tp": val_metrics["tp"],
+        "tn": val_metrics["tn"],
+        "fp": val_metrics["fp"],
+        "fn": val_metrics["fn"],
+        "backbone_lr": 0,
+        "head_lr": args.head_lr,
+        "epoch_time": epoch_time
     })
-
 
     save_history()
 
+    if val_metrics["malware_f1"] > best_val_f1:
 
-    if (
-        val_accuracy
-        > best_val_accuracy
-    ):
-
-        best_val_accuracy = (
-            val_accuracy
-        )
-
+        best_val_f1 = val_metrics["malware_f1"]
 
         save_best_model(
             global_epoch,
             "FC_WARMUP",
-            val_accuracy,
+            val_metrics,
             optimizer
         )
 
-
         print(
             f"Best Model 저장! "
-            f"({val_accuracy:.2f}%)"
+            f"(Malware F1={best_val_f1:.2f}%)"
         )
 
 
 # ==================================================
-#
-# Stage 2
-# Layer4 + FC Fine-tuning
-#
+# Phase 2
+# Layer3 + Layer4 + FC Fine-tuning
 # ==================================================
 
-print("\n")
-print("=" * 50)
-print("Stage 2 : Layer4 + FC Fine-tuning")
-print("=" * 50)
+print("\n" + "=" * 60)
+print("Phase 2 : Layer3 + Layer4 + FC Fine-tuning")
+print("=" * 60)
 
-
-unfreeze_layer4(
-    model
-)
-
-
-# ==========================================
-# 서로 다른 Learning Rate 적용
-# ==========================================
+unfreeze_layer3_layer4(model)
 
 optimizer = torch.optim.AdamW(
-
     [
         {
             "params":
-                model.layer4.parameters(),
-
-            "lr":
-                args.backbone_lr
+                list(model.layer3.parameters())
+                + list(model.layer4.parameters()),
+            "lr": args.backbone_lr
         },
-
         {
-            "params":
-                model.fc.parameters(),
-
-            "lr":
-                args.finetune_head_lr
+            "params": model.fc.parameters(),
+            "lr": args.finetune_head_lr
         }
     ],
-
     weight_decay=args.weight_decay
 )
 
-
-# ==========================================
-# Scheduler
-# ==========================================
-
-scheduler = (
-    torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max",
-        factor=0.5,
-        patience=1
-    )
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode="min",
+    factor=0.5,
+    patience=2
 )
 
-
 early_stop_count = 0
-
 
 for epoch in range(
     args.finetune_epochs
 ):
 
     global_epoch += 1
-
     start_time = time.time()
-
 
     print(
         f"\nFine-tuning "
-        f"[{epoch + 1}/"
-        f"{args.finetune_epochs}]"
+        f"[{epoch + 1}/{args.finetune_epochs}]"
     )
 
-
-    train_loss, train_accuracy = (
-        train_one_epoch(
-            model,
-            train_loader,
-            optimizer,
-            criterion,
-            device
-        )
+    train_loss, train_accuracy = train_one_epoch(
+        model,
+        train_loader,
+        optimizer,
+        criterion,
+        device
     )
 
-
-    val_loss, val_accuracy = (
-        validate(
-            model,
-            val_loader,
-            criterion,
-            device
-        )
+    val_loss, val_metrics = validate(
+        model,
+        val_loader,
+        criterion,
+        device
     )
 
+    scheduler.step(val_loss)
 
-    # ======================================
-    # Scheduler
-    # ======================================
-
-    scheduler.step(
-        val_accuracy
+    backbone_lr = (
+        optimizer.param_groups[0]["lr"]
     )
-
-
-    layer4_lr = (
-        optimizer
-        .param_groups[0]["lr"]
-    )
-
 
     head_lr = (
-        optimizer
-        .param_groups[1]["lr"]
+        optimizer.param_groups[1]["lr"]
     )
 
+    epoch_time = time.time() - start_time
 
-    epoch_time = (
-        time.time()
-        - start_time
-    )
-
-
-    # ======================================
-    # 결과 출력
-    # ======================================
+    print(f"Train Loss        : {train_loss:.4f}")
+    print(f"Train Accuracy    : {train_accuracy:.2f}%")
+    print_val_metrics(val_loss, val_metrics)
 
     print(
-        f"Train Loss     : "
-        f"{train_loss:.4f}"
+        f"Backbone LR       : "
+        f"{backbone_lr:.8f}"
     )
 
     print(
-        f"Train Accuracy : "
-        f"{train_accuracy:.2f}%"
-    )
-
-    print(
-        f"Val Loss       : "
-        f"{val_loss:.4f}"
-    )
-
-    print(
-        f"Val Accuracy   : "
-        f"{val_accuracy:.2f}%"
-    )
-
-    print(
-        f"Layer4 LR      : "
-        f"{layer4_lr:.8f}"
-    )
-
-    print(
-        f"Head LR        : "
+        f"Head LR           : "
         f"{head_lr:.8f}"
     )
 
     print(
-        f"Epoch Time     : "
+        f"Epoch Time        : "
         f"{epoch_time:.2f}초"
     )
 
-
-    # ======================================
-    # 기록
-    # ======================================
-
     history.append({
-        "epoch":
-            global_epoch,
-
-        "stage":
-            "LAYER4_FINETUNE",
-
-        "train_loss":
-            train_loss,
-
-        "train_accuracy":
-            train_accuracy,
-
-        "val_loss":
-            val_loss,
-
-        "val_accuracy":
-            val_accuracy,
-
-        "layer4_lr":
-            layer4_lr,
-
-        "head_lr":
-            head_lr,
-
-        "epoch_time":
-            epoch_time
+        "epoch": global_epoch,
+        "stage": "LAYER3_4_FINETUNE",
+        "train_loss": train_loss,
+        "train_accuracy": train_accuracy,
+        "val_loss": val_loss,
+        "val_accuracy": val_metrics["accuracy"],
+        "malware_precision": val_metrics["malware_precision"],
+        "malware_recall": val_metrics["malware_recall"],
+        "malware_f1": val_metrics["malware_f1"],
+        "benign_recall": val_metrics["benign_recall"],
+        "tp": val_metrics["tp"],
+        "tn": val_metrics["tn"],
+        "fp": val_metrics["fp"],
+        "fn": val_metrics["fn"],
+        "backbone_lr": backbone_lr,
+        "head_lr": head_lr,
+        "epoch_time": epoch_time
     })
-
 
     save_history()
 
+    if val_metrics["malware_f1"] > best_val_f1:
 
-    # ======================================
-    # Best Model
-    # ======================================
-
-    if (
-        val_accuracy
-        > best_val_accuracy
-    ):
-
-        best_val_accuracy = (
-            val_accuracy
-        )
-
+        best_val_f1 = val_metrics["malware_f1"]
         early_stop_count = 0
-
 
         save_best_model(
             global_epoch,
-            "LAYER4_FINETUNE",
-            val_accuracy,
+            "LAYER3_4_FINETUNE",
+            val_metrics,
             optimizer
         )
 
-
         print(
             f"Best Model 저장! "
-            f"({val_accuracy:.2f}%)"
+            f"(Malware F1={best_val_f1:.2f}%)"
         )
-
 
     else:
 
         early_stop_count += 1
 
-
         print(
-            f"성능 개선 없음 "
-            f"({early_stop_count}/"
-            f"{args.patience})"
+            f"F1 개선 없음 "
+            f"({early_stop_count}/{args.patience})"
         )
 
+    if early_stop_count >= args.patience:
 
-    # ======================================
-    # Early Stopping
-    # ======================================
-
-    if (
-        early_stop_count
-        >= args.patience
-    ):
-
-        print(
-            "\nEarly Stopping!"
-        )
-
+        print("\nEarly Stopping!")
         break
 
 
@@ -949,15 +747,13 @@ for epoch in range(
 # 종료
 # ==========================================
 
-print("\n")
-print("=" * 50)
+print("\n" + "=" * 60)
 print("학습 완료")
-print("=" * 50)
-
+print("=" * 60)
 
 print(
-    f"Best Validation Accuracy : "
-    f"{best_val_accuracy:.2f}%"
+    f"Best Malware F1 : "
+    f"{best_val_f1:.2f}%"
 )
 
 print(
