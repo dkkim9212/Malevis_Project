@@ -179,7 +179,7 @@ model = model.to(device)
 # ==========================================
 
 class_weights = torch.tensor(
-    [5.0, 1.0],
+    [7.0, 1.0],
     dtype=torch.float32,
     device=device
 )
