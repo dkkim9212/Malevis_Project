@@ -178,10 +178,16 @@ model = model.to(device)
 # 7. Loss
 # ==========================================
 
-criterion = nn.CrossEntropyLoss(
-    label_smoothing=0.05
+class_weights = torch.tensor(
+    [5.0, 1.0],
+    dtype=torch.float32,
+    device=device
 )
 
+criterion = nn.CrossEntropyLoss(
+    weight=class_weights,
+    label_smoothing=0.05
+)
 
 # ==========================================
 # 8. AMP
