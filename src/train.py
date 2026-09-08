@@ -78,7 +78,7 @@ parser.add_argument(
 parser.add_argument(
     "--backbone_lr",
     type=float,
-    default=0.00005
+    default=0.00001
 )
 
 # Fine-tuning FC LR
@@ -179,7 +179,7 @@ model = model.to(device)
 # ==========================================
 
 class_weights = torch.tensor(
-    [7.0, 1.0],
+    [6.0, 1.0],
     dtype=torch.float32,
     device=device
 )
