@@ -216,7 +216,7 @@ class_weights = torch.tensor(
 print("Class Weights :", class_weights)
 
 criterion = nn.CrossEntropyLoss(
-    weight=class_weights,
+    #weight=class_weights,
     label_smoothing=0.05
 )
 

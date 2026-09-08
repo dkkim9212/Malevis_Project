@@ -113,7 +113,7 @@ def get_dataloaders(data_dir, batch_size=64):
 
     train_sampler = make_balanced_sampler(
         train_dataset.targets,
-        balance_power=0.5
+        balance_power=1.0
     )
 
     train_loader = DataLoader(
