@@ -143,11 +143,15 @@ print("사용 장치 :", device)
 # 5. Dataset
 # ==========================================
 
-train_loader, val_loader, classes = get_dataloaders(
+(
+    train_loader,
+    val_loader,
+    test_loader,
+    classes
+) = get_dataloaders(
     args.data_dir,
     args.batch_size
 )
-
 print("클래스 :", classes)
 print("클래스 수 :", len(classes))
 print("Train 이미지 :", len(train_loader.dataset))
@@ -161,6 +165,15 @@ print(
 print(
     "Validation 원본 분포 :",
     val_loader.dataset.class_counts
+)
+print(
+    "Test 이미지 :",
+    len(test_loader.dataset)
+)
+
+print(
+    "Test 원본 분포 :",
+    test_loader.dataset.class_counts
 )
 
 # --------------------------------------------------
@@ -207,16 +220,9 @@ model = model.to(device)
 # 이번 실험에서는 기존 weight 6 유지
 # ==========================================
 
-class_weights = torch.tensor(
-    [6.0, 1.0],
-    dtype=torch.float32,
-    device=device
-)
 
-print("Class Weights :", class_weights)
 
 criterion = nn.CrossEntropyLoss(
-    #weight=class_weights,
     label_smoothing=0.05
 )
 
